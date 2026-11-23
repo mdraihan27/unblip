@@ -1,0 +1,60 @@
+# Build outputs & Release packages
+/installables/
+/dist/
+/dist-ssr/
+/build/
+/out/
+
+# Node / Frontend dependencies & caches
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.eslintcache
+.vite/
+*.tsbuildinfo
+
+# Rust / Cargo / Tauri build artifacts
+/src-tauri/target/
+/src-tauri/gen/
+/src-tauri/WixTools/
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Packaging intermediates
+*.deb
+*.rpm
+*.AppImage
+*.snap
+*.pkg.tar.zst
+*.tar.gz
+*.tar.xz
+*.tar.zst
+*.run
+squashfs-root/
+
+# Environment & Local config files
+.env
+.env.local
+.env.*.local
+
+# IDE & Editor directories
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS & Temporary files
+.DS_Store
+Thumbs.db
+*~
+*.tmp
+*.bak
+*.log
