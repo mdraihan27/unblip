@@ -51,7 +51,7 @@ fn main() {
                 return;
             }
             return;
-        } else if args.iter().any(|a| a == "--background") {
+        } else if args.iter().any(|a| a == "--background" || a == "--daemon") {
             if try_send_ipc_command("HIDE") {
                 return;
             }
@@ -85,6 +85,6 @@ fn main() {
 
     let start_hidden = args
         .iter()
-        .any(|a| a == "--background" || a == "--daemon-hidden");
+        .any(|a| a == "--background" || a == "--daemon" || a == "--daemon-hidden");
     unblip_lib::run(start_hidden);
 }

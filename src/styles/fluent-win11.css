@@ -280,14 +280,13 @@ body {
 }
 
 .maximized-layout .win11-card-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 10px;
-  align-items: start;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .maximized-layout .win11-settings-list {
-  max-width: 720px;
+  max-width: 100%;
 }
 
 /* Windows 11 Top Icon Tab Bar */
@@ -794,6 +793,11 @@ body {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
   gap: 4px;
+}
+
+.win11-most-used-grid {
+  max-height: 86px;
+  overflow: hidden;
 }
 
 .win11-emoji-cell {

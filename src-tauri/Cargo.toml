@@ -1,8 +1,9 @@
 [package]
 name = "unblip"
-version = "1.0.0"
+version = "1.0.5"
 description = "Windows 11 Clipboard & Emoji Manager for Linux"
-authors = ["snorlax"]
+authors = ["Raihan Hossen <https://raihanhossen.work>"]
+homepage = "https://raihanhossen.work"
 edition = "2021"
 
 [lib]
@@ -24,5 +25,6 @@ base64 = "0.22"
 dirs = "5.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 x11 = { version = "2.21", features = ["xlib", "xtst"] }
+gtk = "0.18"
 libc = "0.2"
 

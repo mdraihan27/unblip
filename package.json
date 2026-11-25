@@ -1,7 +1,7 @@
 {
   "name": "unblip",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.5",
   "description": "Windows 11 Clipboard & Emoji Manager for Linux",
   "type": "module",
   "scripts": {

@@ -52,6 +52,8 @@ pub struct AppSettings {
     pub theme: String, // "light" | "dark" | "system"
     pub show_near_cursor: bool,
     pub hide_on_blur: bool,
+    #[serde(default)]
+    pub close_on_input: bool,
     pub autostart: bool,
     pub play_sound: bool,
 }
@@ -66,7 +68,8 @@ impl Default for AppSettings {
             auto_paste: true,
             theme: "light".to_string(),
             show_near_cursor: true,
-            hide_on_blur: false,
+            hide_on_blur: true,
+            close_on_input: false,
             autostart: true,
             play_sound: false,
         }
@@ -216,7 +219,6 @@ impl StorageState {
             PersistentData::default()
         };
 
-        // Normalize all loaded display timestamps to the unified "Jan 6, 26 3:45 PM" format
         for item in &mut data.items {
             item.created_at_display = format_local_timestamp(item.created_at);
             if let Some(clicked_at) = item.last_clicked_at {
@@ -259,9 +261,6 @@ impl StorageState {
         }
 
         let mut guard = self.data.lock().ok()?;
-        if !guard.settings.history_enabled {
-            return None;
-        }
 
         if let Some(top) = guard.items.first() {
             if top.content_type != ContentType::Image && top.content == text {
@@ -272,19 +271,21 @@ impl StorageState {
         let now = Utc::now();
         let now_display = format_local_timestamp(now);
 
-        if let Some(pos) = guard
-            .items
-            .iter()
-            .position(|item| item.content_type != ContentType::Image && item.content == text)
-        {
-            let mut existing = guard.items.remove(pos);
-            existing.created_at = now;
-            existing.created_at_display = now_display;
-            existing.source_kind = source_kind.to_string();
-            let cloned = existing.clone();
-            guard.items.insert(0, existing);
-            self.save_locked(&guard);
-            return Some(cloned);
+        if guard.settings.history_enabled {
+            if let Some(pos) = guard
+                .items
+                .iter()
+                .position(|item| item.content_type != ContentType::Image && item.content == text)
+            {
+                let mut existing = guard.items.remove(pos);
+                existing.created_at = now;
+                existing.created_at_display = now_display;
+                existing.source_kind = source_kind.to_string();
+                let cloned = existing.clone();
+                guard.items.insert(0, existing);
+                self.save_locked(&guard);
+                return Some(cloned);
+            }
         }
 
         let content_type = classify_text(&text);
@@ -307,7 +308,13 @@ impl StorageState {
             source_kind: source_kind.to_string(),
         };
 
-        guard.items.insert(0, item.clone());
+        if guard.settings.history_enabled {
+            guard.items.insert(0, item.clone());
+        } else {
+            // When clipboard history is turned off, only store the single latest item
+            guard.items.clear();
+            guard.items.push(item.clone());
+        }
         self.save_locked(&guard);
         Some(item)
     }
@@ -319,9 +326,6 @@ impl StorageState {
         height: u32,
     ) -> Option<ClipboardItem> {
         let mut guard = self.data.lock().ok()?;
-        if !guard.settings.history_enabled {
-            return None;
-        }
 
         if let Some(top) = guard.items.first() {
             if top.content_type == ContentType::Image && top.content == data_url {
@@ -348,7 +352,13 @@ impl StorageState {
             source_kind: "clipboard".to_string(),
         };
 
-        guard.items.insert(0, item.clone());
+        if guard.settings.history_enabled {
+            guard.items.insert(0, item.clone());
+        } else {
+            // When clipboard history is turned off, only store the single latest item
+            guard.items.clear();
+            guard.items.push(item.clone());
+        }
         self.save_locked(&guard);
         Some(item)
     }
@@ -464,6 +474,9 @@ impl StorageState {
 
     pub fn update_settings(&self, new_settings: AppSettings) -> AppSettings {
         if let Ok(mut guard) = self.data.lock() {
+            if !new_settings.history_enabled && guard.items.len() > 1 {
+                guard.items.truncate(1);
+            }
             guard.settings = new_settings.clone();
             self.save_locked(&guard);
         }
@@ -572,12 +585,43 @@ mod tests {
             store.add_text_item("Second item".to_string(), "clipboard");
         }
 
-        // Corrupt primary JSON file and verify backup recovery
         fs::write(&path, "{ corrupted json !!!").unwrap();
         let recovered = StorageState::new(Some(path.clone()));
         let guard = recovered.data.lock().unwrap();
         assert_eq!(guard.items.len(), 1);
         assert_eq!(guard.items[0].content, "Backup test item");
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("json.bak"));
+    }
+
+    #[test]
+    fn test_default_settings_and_single_latest_item_when_history_off() {
+        let defaults = AppSettings::default();
+        assert!(
+            defaults.history_enabled,
+            "Default history_enabled must be true"
+        );
+        assert!(defaults.hide_on_blur, "Default hide_on_blur must be true");
+
+        let path = temp_store_path("single_latest");
+        let store = StorageState::new(Some(path.clone()));
+        store.add_text_item("First item".to_string(), "clipboard");
+        store.add_text_item("Second item".to_string(), "clipboard");
+        assert_eq!(store.data.lock().unwrap().items.len(), 2);
+
+        // Turn history OFF -> should truncate to only the latest 1 item
+        let mut s = defaults.clone();
+        s.history_enabled = false;
+        store.update_settings(s);
+        assert_eq!(store.data.lock().unwrap().items.len(), 1);
+        assert_eq!(store.data.lock().unwrap().items[0].content, "Second item");
+
+        // Copy a third item while history is OFF -> should replace the single item so only latest 1 is stored
+        store.add_text_item("Third latest item".to_string(), "clipboard");
+        let guard = store.data.lock().unwrap();
+        assert_eq!(guard.items.len(), 1);
+        assert_eq!(guard.items[0].content, "Third latest item");
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("json.bak"));

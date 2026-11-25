@@ -4,8 +4,7 @@ pub mod storage;
 pub mod window;
 
 use clipboard::{
-    simulate_ctrl_v_paste, start_clipboard_watcher, write_image_data_url_to_clipboard,
-    write_text_to_system_clipboard,
+    start_clipboard_watcher, write_image_data_url_to_clipboard, write_text_to_system_clipboard,
 };
 use shortcut::{register_shortcut, sync_autostart_desktop_file};
 use std::fs;
@@ -23,8 +22,11 @@ use tauri::{
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use window::{
-    hide_popup, record_window_moved, set_maximized_mode, show_popup_near_cursor,
-    start_ibus_cursor_tracker, toggle_popup,
+    begin_window_drag, commit_text_to_active_input_box, configure_window_focusable,
+    has_active_text_cursor, hide_popup, is_pointer_inside_unblip_window,
+    is_window_dragging_recently, mark_window_drag_ended, record_window_moved, set_maximized_mode,
+    set_pointer_inside_webview, show_popup_near_cursor, start_ibus_cursor_tracker,
+    step_window_drag, toggle_popup,
 };
 
 pub fn ipc_socket_path() -> PathBuf {
@@ -87,6 +89,9 @@ fn set_history_enabled(
     let updated = {
         let mut guard = storage.data.lock().map_err(|e| e.to_string())?;
         guard.settings.history_enabled = enabled;
+        if !enabled && guard.items.len() > 1 {
+            guard.items.truncate(1);
+        }
         storage.save_locked(&guard);
         guard.settings.clone()
     };
@@ -101,26 +106,43 @@ fn select_clipboard_item(
     id: String,
     should_hide: Option<bool>,
 ) -> Result<Option<ClipboardItem>, String> {
+    let is_explicit_menu_copy = should_hide == Some(false);
+
+    // If the user clicked a clipboard card directly (not the '...' -> 'Copy' menu action)
+    // and no text input box is currently selected, do nothing and do NOT close the window!
+    if !is_explicit_menu_copy && !has_active_text_cursor() {
+        return Ok(None);
+    }
+
     let updated = storage.record_item_clicked(&id);
+    let mut text_to_paste: Option<String> = None;
+
     if let Some(ref item) = updated {
         if item.content_type == ContentType::Image {
             write_image_data_url_to_clipboard(&storage, &item.content)?;
         } else {
             write_text_to_system_clipboard(&storage, &item.content)?;
+            text_to_paste = Some(item.content.clone());
         }
     }
 
-    let auto_paste = storage
+    let (auto_paste, close_on_input) = storage
         .data
         .lock()
-        .map(|d| d.settings.auto_paste)
-        .unwrap_or(true);
+        .map(|d| (d.settings.auto_paste, d.settings.close_on_input))
+        .unwrap_or((true, false));
 
-    if should_hide.unwrap_or(true) {
-        hide_popup(&app);
-        if auto_paste {
-            simulate_ctrl_v_paste();
+    // Ensure window does not hold focus so the target input box receives the commit
+    configure_window_focusable(&app, false);
+
+    if auto_paste && has_active_text_cursor() {
+        if let Some(ref txt) = text_to_paste {
+            let _ = commit_text_to_active_input_box(txt);
         }
+    }
+
+    if !is_explicit_menu_copy && close_on_input && has_active_text_cursor() {
+        hide_popup(&app);
     }
 
     let _ = app.emit("clipboard-updated", ());
@@ -134,25 +156,63 @@ fn select_symbol_or_emoji(
     symbol: String,
     name: String,
     kind: String,
-    should_hide: Option<bool>,
+    _should_hide: Option<bool>,
 ) -> Result<Vec<FrequentItem>, String> {
-    write_text_to_system_clipboard(&storage, &symbol)?;
-    let frequent = storage.record_frequent_symbol(symbol, name, kind);
+    // If no text input box is selected, do nothing and keep the window open
+    if !has_active_text_cursor() {
+        let current_freq = storage
+            .data
+            .lock()
+            .map(|g| g.frequent_items.clone())
+            .unwrap_or_default();
+        return Ok(current_freq);
+    }
 
-    let auto_paste = storage
+    write_text_to_system_clipboard(&storage, &symbol)?;
+    let frequent = storage.record_frequent_symbol(symbol.clone(), name, kind);
+
+    let (auto_paste, close_on_input) = storage
         .data
         .lock()
-        .map(|d| d.settings.auto_paste)
-        .unwrap_or(true);
+        .map(|d| (d.settings.auto_paste, d.settings.close_on_input))
+        .unwrap_or((true, false));
 
-    if should_hide.unwrap_or(true) {
+    configure_window_focusable(&app, false);
+
+    if auto_paste {
+        let _ = commit_text_to_active_input_box(&symbol);
+    }
+
+    if close_on_input {
         hide_popup(&app);
-        if auto_paste {
-            simulate_ctrl_v_paste();
-        }
     }
 
     Ok(frequent)
+}
+
+#[tauri::command]
+fn set_window_input_focus(app: AppHandle, focused: bool) {
+    configure_window_focusable(&app, focused);
+}
+
+#[tauri::command]
+fn notify_drag_started(app: AppHandle, offset_x: Option<i32>, offset_y: Option<i32>) {
+    begin_window_drag(&app, offset_x.unwrap_or(184), offset_y.unwrap_or(15));
+}
+
+#[tauri::command]
+fn drag_window_by(app: AppHandle, _dx: Option<i32>, _dy: Option<i32>) {
+    step_window_drag(&app);
+}
+
+#[tauri::command]
+fn notify_drag_ended() {
+    mark_window_drag_ended();
+}
+
+#[tauri::command]
+fn notify_pointer_inside(inside: bool) {
+    set_pointer_inside_webview(inside);
 }
 
 #[tauri::command]
@@ -321,7 +381,7 @@ pub fn run(start_hidden: bool) {
         .setup(move |app| {
             let handle = app.handle().clone();
 
-            start_ibus_cursor_tracker();
+            start_ibus_cursor_tracker(handle.clone(), storage_for_setup.clone());
             start_ipc_server(handle.clone(), storage_for_setup.clone());
             start_clipboard_watcher(handle.clone(), storage_for_setup.clone());
 
@@ -364,8 +424,11 @@ pub fn run(start_hidden: bool) {
                     .lock()
                     .map(|d| d.settings.hide_on_blur)
                     .unwrap_or(false);
-                if hide_on_blur {
-                    let _ = window.hide();
+                if hide_on_blur
+                    && !is_window_dragging_recently()
+                    && !is_pointer_inside_unblip_window(window.app_handle(), 18)
+                {
+                    hide_popup(window.app_handle());
                 }
             }
             _ => {}
@@ -383,6 +446,11 @@ pub fn run(start_hidden: bool) {
             save_settings,
             hide_window,
             set_window_maximized_mode,
+            set_window_input_focus,
+            notify_drag_started,
+            drag_window_by,
+            notify_drag_ended,
+            notify_pointer_inside,
             show_window_at_cursor,
         ])
         .run(tauri::generate_context!())

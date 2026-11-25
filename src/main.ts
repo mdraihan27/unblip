@@ -46,6 +46,7 @@ interface AppSettings {
   theme: "light" | "dark" | "system";
   show_near_cursor: boolean;
   hide_on_blur: boolean;
+  close_on_input: boolean;
   autostart: boolean;
   play_sound: boolean;
 }
@@ -74,6 +75,8 @@ class UnblipApp {
 
   private recordingShortcut = false;
   private themeDropdownOpen = false;
+  private pointerInsideSent = false;
+  private isDraggingWindow = false;
   private toastMessage: string | null = null;
   private toastTimer: number | null = null;
 
@@ -86,7 +89,8 @@ class UnblipApp {
       auto_paste: true,
       theme: "light",
       show_near_cursor: true,
-      hide_on_blur: false,
+      hide_on_blur: true,
+      close_on_input: false,
       autostart: true,
       play_sound: false,
     },
@@ -113,6 +117,39 @@ class UnblipApp {
     });
 
     window.addEventListener("keydown", (e) => this.handleGlobalKeyDown(e));
+    const markInside = (inside: boolean) => {
+      if (this.pointerInsideSent !== inside) {
+        this.pointerInsideSent = inside;
+        invoke("notify_pointer_inside", { inside });
+      }
+    };
+    document.addEventListener("mouseenter", () => markInside(true));
+    document.addEventListener("mousemove", (e) => {
+      markInside(true);
+      if (this.isDraggingWindow) {
+        if ((e.buttons & 1) === 0) {
+          this.isDraggingWindow = false;
+          invoke("notify_drag_ended");
+        }
+      }
+    });
+    document.addEventListener("mousedown", () => markInside(true));
+    window.addEventListener("mouseup", () => {
+      if (this.isDraggingWindow) {
+        this.isDraggingWindow = false;
+        invoke("notify_drag_ended");
+      }
+    });
+    document.addEventListener("mouseleave", () => {
+      if (!this.isDraggingWindow) {
+        markInside(false);
+      }
+    });
+    window.addEventListener("blur", () => {
+      if (!this.isDraggingWindow) {
+        markInside(false);
+      }
+    });
     window.addEventListener("click", (e) => {
       const target = e.target as HTMLElement;
       let needsRender = false;
@@ -312,20 +349,24 @@ class UnblipApp {
     symbol: string,
     name: string,
     kind: "emoji" | "kaomoji" | "symbol",
-    shouldHide = true
+    shouldHide = false
   ) {
     try {
+      const prevCount =
+        this.state.frequent_items.find((f) => f.symbol === symbol)?.use_count ?? 0;
       const frequent = await invoke<FrequentItem[]>("select_symbol_or_emoji", {
         symbol,
         name,
         kind,
         shouldHide,
       });
+      const newCount =
+        frequent.find((f) => f.symbol === symbol)?.use_count ?? 0;
       this.state.frequent_items = frequent;
-      if (!shouldHide) {
-        this.showToast(`Copied ${symbol}`);
+      if (newCount > prevCount) {
+        this.showToast(`Inserted ${symbol}`);
+        this.render();
       }
-      this.render();
     } catch (err) {
       console.error("Failed to select symbol:", err);
     }
@@ -656,8 +697,12 @@ class UnblipApp {
   }
 
   private renderClipboardTab(): string {
-    // 1. If clipboard history is turned off, render exact Windows 11 "Let's get started" screen
-    if (!this.state.settings.history_enabled) {
+    const historyEnabled = this.state.settings.history_enabled;
+    const items = this.getFilteredClipboardItems();
+    const totalCount = this.state.items.length;
+
+    // If clipboard history is turned off AND there is no latest item yet, render "Let's get started" screen
+    if (!historyEnabled && totalCount === 0) {
       return `
         <div class="win11-section-header">
           <span class="win11-section-title">Clipboard</span>
@@ -677,16 +722,23 @@ class UnblipApp {
       `;
     }
 
-    const items = this.getFilteredClipboardItems();
-    const totalCount = this.state.items.length;
-
     return `
       <div class="win11-section-header">
         <div class="win11-section-title-group">
           <span class="win11-section-title">Clipboard</span>
           ${totalCount > 0 ? `<span class="win11-count-pill">${totalCount}</span>` : ""}
+          ${
+            !historyEnabled
+              ? `<span class="win11-meta-tag" title="Clipboard history is off — only keeping the latest item">Latest only</span>`
+              : ""
+          }
         </div>
         <div class="win11-header-actions">
+          ${
+            !historyEnabled
+              ? `<button class="win11-fluent-btn" id="win11-btn-turn-on" title="Turn on full clipboard history">Turn on history</button>`
+              : ""
+          }
           <button class="win11-fluent-btn" id="win11-btn-quick-add" title="Add custom text snippet">
             + Add
           </button>
@@ -787,11 +839,6 @@ class UnblipApp {
         <div class="win11-card-meta">
           <span title="Date & time copied">${this.escapeHtml(this.formatShortDate(item.created_at, item.created_at_display))}</span>
           ${
-            item.last_clicked_at || item.last_clicked_display
-              ? `<span class="win11-meta-tag clicked-tag" title="Last clicked/pasted date & time">Clicked ${this.escapeHtml(this.formatShortDate(item.last_clicked_at, item.last_clicked_display))} (${item.click_count}×)</span>`
-              : ""
-          }
-          ${
             item.source_kind === "selection"
               ? `<span class="win11-meta-tag">Auto-selected</span>`
               : ""
@@ -864,10 +911,10 @@ class UnblipApp {
 
   private renderRecentTab(): string {
     const q = this.searchQuery.trim().toLowerCase();
-    const list = this.state.frequent_items.filter(
-      (f) => !q || f.name.toLowerCase().includes(q) || f.symbol.includes(q)
-    );
-    const totalCount = this.state.frequent_items.length;
+    const list = this.state.frequent_items
+      .filter((f) => !q || f.name.toLowerCase().includes(q) || f.symbol.includes(q))
+      .slice(0, 14);
+    const totalCount = list.length;
 
     return `
       <div class="win11-section-header">
@@ -877,7 +924,7 @@ class UnblipApp {
         </div>
         <div class="win11-header-actions">
           ${
-            totalCount > 0
+            this.state.frequent_items.length > 0
               ? `<button class="win11-fluent-btn" id="win11-btn-clear-frequent" title="Clear most used history">Clear all</button>`
               : ""
           }
@@ -887,7 +934,7 @@ class UnblipApp {
         ${
           list.length > 0
             ? `
-          <div class="win11-emoji-grid" style="margin-bottom: 14px;">
+          <div class="win11-emoji-grid win11-most-used-grid">
             ${list
               .map(
                 (item) => `
@@ -896,38 +943,10 @@ class UnblipApp {
                 data-symbol="${this.escapeHtml(item.symbol)}"
                 data-name="${this.escapeHtml(item.name)}"
                 data-kind="${item.kind}"
-                title="${this.escapeHtml(item.name)} — Used ${item.use_count}× (${this.escapeHtml(this.formatShortDate(item.last_used_at, item.last_used_display))})"
+                title="${this.escapeHtml(item.name)}"
               >
                 ${this.escapeHtml(item.symbol)}
               </button>
-            `
-              )
-              .join("")}
-          </div>
-          <div style="font-size: 11.5px; color: var(--text-secondary); margin-bottom: 6px; font-weight: 500;">
-            Recent usage activity
-          </div>
-          <div class="win11-card-list">
-            ${list
-              .slice(0, 12)
-              .map(
-                (item) => `
-              <div
-                class="win11-setting-card"
-                style="cursor: pointer; padding: 7px 11px;"
-                data-symbol="${this.escapeHtml(item.symbol)}"
-                data-name="${this.escapeHtml(item.name)}"
-                data-kind="${item.kind}"
-              >
-                <div style="display: flex; align-items: center; gap: 10px;">
-                  <span style="font-size: 20px;">${this.escapeHtml(item.symbol)}</span>
-                  <div class="win11-setting-info">
-                    <span class="win11-setting-title">${this.escapeHtml(item.name)}</span>
-                    <span class="win11-setting-sub">${this.escapeHtml(this.formatShortDate(item.last_used_at, item.last_used_display))}</span>
-                  </div>
-                </div>
-                <span class="win11-count-pill">${item.use_count}×</span>
-              </div>
             `
               )
               .join("")}
@@ -1156,8 +1175,8 @@ class UnblipApp {
           <!-- Shortcut Recorder -->
           <div class="win11-setting-card">
             <div class="win11-setting-info">
-              <span class="win11-setting-title">Show / Hide Shortcut</span>
-              <span class="win11-setting-sub">Click button and press keys (registered globally & in GNOME)</span>
+              <span class="win11-setting-title">Keyboard shortcut</span>
+              <span class="win11-setting-sub">Press these keys to open or close Unblip</span>
             </div>
             <button
               class="win11-shortcut-btn ${this.recordingShortcut ? "recording" : ""}"
@@ -1167,47 +1186,11 @@ class UnblipApp {
             </button>
           </div>
 
-          <!-- Auto-copy when text selected -->
+          <!-- Paste on click -->
           <div class="win11-setting-card">
             <div class="win11-setting-info">
-              <span class="win11-setting-title">Auto-copy when text is selected</span>
-              <span class="win11-setting-sub">Automatically save highlighted text into clipboard history</span>
-            </div>
-            <button
-              class="win11-switch ${s.auto_copy_selection ? "on" : ""}"
-              data-toggle-setting="auto_copy_selection"
-            ></button>
-          </div>
-
-          <!-- Also sync selection to Ctrl+V clipboard -->
-          <div class="win11-setting-card">
-            <div class="win11-setting-info">
-              <span class="win11-setting-title">Sync selected text to primary Ctrl+V</span>
-              <span class="win11-setting-sub">When auto-copy is on, also make selected text active for Ctrl+V</span>
-            </div>
-            <button
-              class="win11-switch ${s.sync_selection_to_clipboard ? "on" : ""}"
-              data-toggle-setting="sync_selection_to_clipboard"
-            ></button>
-          </div>
-
-          <!-- Show near cursor -->
-          <div class="win11-setting-card">
-            <div class="win11-setting-info">
-              <span class="win11-setting-title">Show popup near cursor position</span>
-              <span class="win11-setting-sub">Opens right around your mouse pointer when triggered</span>
-            </div>
-            <button
-              class="win11-switch ${s.show_near_cursor ? "on" : ""}"
-              data-toggle-setting="show_near_cursor"
-            ></button>
-          </div>
-
-          <!-- Auto-paste on click -->
-          <div class="win11-setting-card">
-            <div class="win11-setting-info">
-              <span class="win11-setting-title">Auto-paste into active app on click</span>
-              <span class="win11-setting-sub">Copies item, hides popup, and sends Ctrl+V automatically</span>
+              <span class="win11-setting-title">Paste item on click</span>
+              <span class="win11-setting-sub">Click any item or emoji to paste it right into your text box</span>
             </div>
             <button
               class="win11-switch ${s.auto_paste ? "on" : ""}"
@@ -1215,11 +1198,71 @@ class UnblipApp {
             ></button>
           </div>
 
+          <!-- Clipboard History Master Toggle -->
+          <div class="win11-setting-card">
+            <div class="win11-setting-info">
+              <span class="win11-setting-title">Clipboard history</span>
+              <span class="win11-setting-sub">Save everything you copy (turn off to only keep the latest item)</span>
+            </div>
+            <button
+              class="win11-switch ${s.history_enabled ? "on" : ""}"
+              data-toggle-setting="history_enabled"
+            ></button>
+          </div>
+
+          <!-- Close when clicking outside -->
+          <div class="win11-setting-card">
+            <div class="win11-setting-info">
+              <span class="win11-setting-title">Close when clicking outside</span>
+              <span class="win11-setting-sub">Hide the window when you click anywhere else</span>
+            </div>
+            <button
+              class="win11-switch ${s.hide_on_blur ? "on" : ""}"
+              data-toggle-setting="hide_on_blur"
+            ></button>
+          </div>
+
+          <!-- Close window after pasting / input -->
+          <div class="win11-setting-card">
+            <div class="win11-setting-info">
+              <span class="win11-setting-title">Close window after pasting</span>
+              <span class="win11-setting-sub">Hide the window right after inserting a clipboard item, emoji, or symbol</span>
+            </div>
+            <button
+              class="win11-switch ${s.close_on_input ? "on" : ""}"
+              data-toggle-setting="close_on_input"
+            ></button>
+          </div>
+
+          <!-- Show near cursor -->
+          <div class="win11-setting-card">
+            <div class="win11-setting-info">
+              <span class="win11-setting-title">Open near cursor</span>
+              <span class="win11-setting-sub">Show the window next to where you are typing</span>
+            </div>
+            <button
+              class="win11-switch ${s.show_near_cursor ? "on" : ""}"
+              data-toggle-setting="show_near_cursor"
+            ></button>
+          </div>
+
+          <!-- Auto-copy when text selected -->
+          <div class="win11-setting-card">
+            <div class="win11-setting-info">
+              <span class="win11-setting-title">Auto-copy selected text</span>
+              <span class="win11-setting-sub">Automatically copy text as soon as you highlight it</span>
+            </div>
+            <button
+              class="win11-switch ${s.auto_copy_selection ? "on" : ""}"
+              data-toggle-setting="auto_copy_selection"
+            ></button>
+          </div>
+
           <!-- Theme Selector (Custom Windows 11 Fluent Dropdown) -->
           <div class="win11-setting-card">
             <div class="win11-setting-info">
-              <span class="win11-setting-title">Windows 11 Fluent Theme</span>
-              <span class="win11-setting-sub">Switch between Fluent Light, Dark, or System</span>
+              <span class="win11-setting-title">App theme</span>
+              <span class="win11-setting-sub">Choose Light, Dark, or match your system</span>
             </div>
             <div class="win11-dropdown" id="win11-theme-dropdown">
               <button
@@ -1229,9 +1272,9 @@ class UnblipApp {
               >
                 <span>${
                   s.theme === "light"
-                    ? "Light (Win11)"
+                    ? "Light"
                     : s.theme === "dark"
-                    ? "Dark (Win11)"
+                    ? "Dark"
                     : "System Auto"
                 }</span>
                 <span class="win11-dropdown-chevron">
@@ -1249,14 +1292,14 @@ class UnblipApp {
                     class="win11-dropdown-option ${s.theme === "light" ? "selected" : ""}"
                     data-theme-opt="light"
                   >
-                    <span>☀️ Light (Win11)</span>
+                    <span>☀️ Light</span>
                   </button>
                   <button
                     type="button"
                     class="win11-dropdown-option ${s.theme === "dark" ? "selected" : ""}"
                     data-theme-opt="dark"
                   >
-                    <span>🌙 Dark (Win11)</span>
+                    <span>🌙 Dark</span>
                   </button>
                   <button
                     type="button"
@@ -1272,35 +1315,11 @@ class UnblipApp {
             </div>
           </div>
 
-          <!-- Clipboard History Master Toggle -->
-          <div class="win11-setting-card">
-            <div class="win11-setting-info">
-              <span class="win11-setting-title">Save clipboard history forever</span>
-              <span class="win11-setting-sub">Persist copied items & timestamps across PC restarts</span>
-            </div>
-            <button
-              class="win11-switch ${s.history_enabled ? "on" : ""}"
-              data-toggle-setting="history_enabled"
-            ></button>
-          </div>
-
-          <!-- Hide when clicking outside -->
-          <div class="win11-setting-card">
-            <div class="win11-setting-info">
-              <span class="win11-setting-title">Auto-hide when clicking outside</span>
-              <span class="win11-setting-sub">Dismiss popup automatically when window loses focus</span>
-            </div>
-            <button
-              class="win11-switch ${s.hide_on_blur ? "on" : ""}"
-              data-toggle-setting="hide_on_blur"
-            ></button>
-          </div>
-
           <!-- Launch on system startup -->
           <div class="win11-setting-card">
             <div class="win11-setting-info">
-              <span class="win11-setting-title">Start background daemon on login</span>
-              <span class="win11-setting-sub">Ready immediately when you press ${this.escapeHtml(s.shortcut)}</span>
+              <span class="win11-setting-title">Start automatically on login</span>
+              <span class="win11-setting-sub">Run in the background when your computer starts</span>
             </div>
             <button
               class="win11-switch ${s.autostart ? "on" : ""}"
@@ -1311,11 +1330,11 @@ class UnblipApp {
           <!-- Clear all including pinned -->
           <div class="win11-setting-card">
             <div class="win11-setting-info">
-              <span class="win11-setting-title">Erase entire history (including pinned)</span>
-              <span class="win11-setting-sub">Currently storing ${this.state.items.length} clipboard items</span>
+              <span class="win11-setting-title">Delete all saved items</span>
+              <span class="win11-setting-sub">Remove everything including pinned items (${this.state.items.length} saved)</span>
             </div>
             <button class="win11-fluent-btn" id="win11-btn-wipe-all" style="color: var(--danger);">
-              Wipe All
+              Delete all
             </button>
           </div>
         </div>
@@ -1324,12 +1343,19 @@ class UnblipApp {
   }
 
   private attachEventListeners() {
-    // Drag window via top grip bar
+    // Drag window via top grip bar using native X11 pointer coordinates
     const dragRegion = document.getElementById("win11-drag-region");
     dragRegion?.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
       const target = e.target as HTMLElement;
       if (target.closest("#win11-btn-close") || target.closest("#win11-btn-maximize")) return;
-      getCurrentWindow().startDragging();
+      e.preventDefault();
+      this.pointerInsideSent = true;
+      this.isDraggingWindow = true;
+      invoke("notify_drag_started", {
+        offsetX: Math.round(e.clientX),
+        offsetY: Math.round(e.clientY),
+      });
     });
 
     // Maximize / Restore button
@@ -1379,8 +1405,14 @@ class UnblipApp {
       }
     });
 
-    // Search input typing
+    // Search input typing & temporary window keyboard focus enable
     const searchBox = document.getElementById("win11-search-box") as HTMLInputElement | null;
+    searchBox?.addEventListener("mousedown", () => {
+      invoke("set_window_input_focus", { focused: true }).then(() => searchBox.focus());
+    });
+    searchBox?.addEventListener("blur", () => {
+      invoke("set_window_input_focus", { focused: false });
+    });
     searchBox?.addEventListener("input", () => {
       this.searchQuery = searchBox.value;
       this.selectedCardIndex = 0;
@@ -1411,6 +1443,12 @@ class UnblipApp {
     const quickAddInput = document.getElementById(
       "win11-quick-add-input"
     ) as HTMLInputElement | null;
+    quickAddInput?.addEventListener("mousedown", () => {
+      invoke("set_window_input_focus", { focused: true }).then(() => quickAddInput.focus());
+    });
+    quickAddInput?.addEventListener("blur", () => {
+      invoke("set_window_input_focus", { focused: false });
+    });
     quickAddInput?.addEventListener("input", () => {
       this.quickAddText = quickAddInput.value;
     });
@@ -1525,7 +1563,7 @@ class UnblipApp {
       });
     });
 
-    // Emoji / Kaomoji / Symbol selection
+    // Emoji / Kaomoji / Symbol selection (keeps window open and inserts directly into active input box)
     document.querySelectorAll<HTMLElement>("[data-symbol]").forEach((el) => {
       el.addEventListener("click", () => {
         const symbol = el.getAttribute("data-symbol");
@@ -1535,7 +1573,7 @@ class UnblipApp {
           | "kaomoji"
           | "symbol";
         if (symbol) {
-          this.handleSelectSymbol(symbol, name, kind, true);
+          this.handleSelectSymbol(symbol, name, kind, false);
         }
       });
 
@@ -1599,6 +1637,7 @@ class UnblipApp {
     // Settings controls
     document.getElementById("win11-btn-record-shortcut")?.addEventListener("click", () => {
       this.recordingShortcut = !this.recordingShortcut;
+      invoke("set_window_input_focus", { focused: this.recordingShortcut });
       this.render();
     });
 

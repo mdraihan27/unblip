@@ -7,12 +7,10 @@ use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
-use std::ptr;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use x11::{xlib, xtest};
 
 /// Persistent shared clipboard writer instance so Linux X11/Wayland selection ownership
 /// is never dropped prematurely after `set_text` / `set_image`.
@@ -83,21 +81,16 @@ pub fn start_clipboard_watcher(app: AppHandle, storage: SharedStorage) {
                 continue;
             };
 
-            let (history_enabled, auto_copy_selection, sync_selection) = {
+            let (auto_copy_selection, sync_selection) = {
                 if let Ok(guard) = storage.data.lock() {
                     (
-                        guard.settings.history_enabled,
                         guard.settings.auto_copy_selection,
                         guard.settings.sync_selection_to_clipboard,
                     )
                 } else {
-                    (true, false, false)
+                    (false, false)
                 }
             };
-
-            if !history_enabled {
-                continue;
-            }
 
             // 1. Check regular CLIPBOARD text
             if let Ok(text) = cb.get_text() {
@@ -303,41 +296,4 @@ pub fn write_image_data_url_to_clipboard(
     }
 
     with_writer_clipboard(|cb| cb.set_image(img_data.clone()).map_err(|e| e.to_string()))
-}
-
-/// Simulates Ctrl+V keystroke via X11 XTest extension after focus returns to the user's previous window.
-pub fn simulate_ctrl_v_paste() {
-    thread::spawn(|| {
-        ensure_safe_x11_error_handler();
-        thread::sleep(Duration::from_millis(95));
-        unsafe {
-            let display = xlib::XOpenDisplay(ptr::null());
-            if display.is_null() {
-                return;
-            }
-
-            // XK_Control_L = 0xffe3, XK_v = 0x0076
-            let ctrl_keycode = xlib::XKeysymToKeycode(display, 0xffe3);
-            let v_keycode = xlib::XKeysymToKeycode(display, 0x0076);
-
-            if ctrl_keycode != 0 && v_keycode != 0 {
-                xtest::XTestFakeKeyEvent(display, ctrl_keycode as u32, 1, 0);
-                xlib::XFlush(display);
-                thread::sleep(Duration::from_millis(12));
-
-                xtest::XTestFakeKeyEvent(display, v_keycode as u32, 1, 0);
-                xlib::XFlush(display);
-                thread::sleep(Duration::from_millis(12));
-
-                xtest::XTestFakeKeyEvent(display, v_keycode as u32, 0, 0);
-                xlib::XFlush(display);
-                thread::sleep(Duration::from_millis(12));
-
-                xtest::XTestFakeKeyEvent(display, ctrl_keycode as u32, 0, 0);
-                xlib::XFlush(display);
-            }
-
-            xlib::XCloseDisplay(display);
-        }
-    });
 }
