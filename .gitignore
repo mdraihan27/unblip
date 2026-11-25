@@ -37,12 +37,9 @@ Cargo.lock
 squashfs-root/
 
 # Environment & Local config files
-.env
-.env.local
 .env.*.local
 
 # IDE & Editor directories
-.vscode/*
 !.vscode/extensions.json
 .idea/
 *.suo
@@ -58,3 +55,4 @@ Thumbs.db
 *.tmp
 *.bak
 *.log
+config.bat
